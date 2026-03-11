@@ -3,14 +3,14 @@ from django.contrib.auth.models import User
 
 
 class UserDetails(models.Model):
-    user         = models.OneToOneField(User, on_delete=models.CASCADE, related_name='details')
-    supabase_uid = models.CharField(max_length=128, unique=True)  # ← was firebase_uid
-    name         = models.CharField(max_length=255)
-    email        = models.EmailField(unique=True)
-    phone        = models.CharField(max_length=15, blank=True, null=True)
+    user             = models.OneToOneField(User, on_delete=models.CASCADE, related_name='details')
+    supabase_uid     = models.CharField(max_length=128, unique=True)
+    name             = models.CharField(max_length=255)
+    email            = models.EmailField(unique=True)
+    phone            = models.CharField(max_length=15, blank=True, null=True)
     trips_registered = models.JSONField(default=list, blank=True)
     trips_success    = models.JSONField(default=list, blank=True)
-    created_at   = models.DateTimeField(auto_now_add=True)
+    created_at       = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = 'user_details'
@@ -99,3 +99,30 @@ class SeatAvailability(models.Model):
 
     class Meta:
         db_table = 'remaining_seats'
+
+
+class Post(models.Model):
+    user       = models.ForeignKey(User, on_delete=models.CASCADE, related_name='posts')
+    image_url  = models.TextField()
+    caption    = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'posts'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Post by {self.user.username}"
+
+
+class Follower(models.Model):
+    follower   = models.ForeignKey(User, on_delete=models.CASCADE, related_name='following')
+    following  = models.ForeignKey(User, on_delete=models.CASCADE, related_name='followers')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table      = 'followers'
+        unique_together = ('follower', 'following')
+
+    def __str__(self):
+        return f"{self.follower.username} → {self.following.username}"

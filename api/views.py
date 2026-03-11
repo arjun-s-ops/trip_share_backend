@@ -8,17 +8,23 @@ from jwt import PyJWKClient
 from datetime import timedelta
 from django.db import IntegrityError
 from django.contrib.auth.models import User
+from django.core.mail import send_mail
+from django.core.cache import cache
+from django.conf import settings
+import random
 from .models import (
     Trip, Route, Vehicle, PaymentDetails,
     ContactDetails, GroupDetails, UserDetails, SeatAvailability,
+    Post, Follower,
 )
 from .serializers import (
-    UserProfileSerializer,
+    UserProfileSerializer, OtherUserProfileSerializer,
     TripSerializer, RouteSerializer, VehicleSerializer,
     PaymentDetailsSerializer, ContactDetailsSerializer, GroupDetailsSerializer,
 )
 
 SUPABASE_JWKS_URL = 'https://tqmrytzypqsuxjwdrihh.supabase.co/auth/v1/.well-known/jwks.json'
+OTP_EXPIRY_SECONDS = 600  # 10 minutes
 
 
 def _verify_supabase_token(access_token: str) -> dict:
@@ -52,13 +58,10 @@ def _extract_name(decoded: dict):
 
 
 def _get_or_fix_user_details(user, supabase_uid, email, name):
-    # 1. Already linked to this user
     try:
         return UserDetails.objects.get(user=user)
     except UserDetails.DoesNotExist:
         pass
-
-    # 2. Exists under same supabase_uid (race condition / duplicate request)
     try:
         details = UserDetails.objects.get(supabase_uid=supabase_uid)
         if details.user != user:
@@ -68,8 +71,6 @@ def _get_or_fix_user_details(user, supabase_uid, email, name):
         return details
     except UserDetails.DoesNotExist:
         pass
-
-    # 3. Exists under same email (e.g. email signup then Google login)
     try:
         details              = UserDetails.objects.get(email=email)
         details.user         = user
@@ -78,20 +79,88 @@ def _get_or_fix_user_details(user, supabase_uid, email, name):
         return details
     except UserDetails.DoesNotExist:
         pass
-
-    # 4. Truly new — create, handle race condition gracefully
     try:
         return UserDetails.objects.create(
-            user=user,
-            supabase_uid=supabase_uid,
-            name=name,
-            email=email,
-        )
+            user=user, supabase_uid=supabase_uid, name=name, email=email)
     except IntegrityError:
         try:
             return UserDetails.objects.get(supabase_uid=supabase_uid)
         except UserDetails.DoesNotExist:
             return UserDetails.objects.get(email=email)
+
+
+# ── OTP ───────────────────────────────────────────────────────────────────────
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def send_otp(request):
+    """
+    Generates a 6-digit OTP, stores it in cache for 10 minutes,
+    and sends it to the provided email via Gmail SMTP.
+    """
+    email = request.data.get('email', '').strip()
+    if not email or '@' not in email:
+        return Response({'error': 'Valid email is required'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        otp       = str(random.randint(100000, 999999))
+        cache_key = f'otp_email_{email}'
+
+        # Store in cache — auto-deletes after OTP_EXPIRY_SECONDS
+        cache.set(cache_key, otp, timeout=OTP_EXPIRY_SECONDS)
+
+        send_mail(
+            subject='Your TripShare Verification Code',
+            message=(
+                f'Your verification code is: {otp}\n\n'
+                f'This code is valid for 10 minutes.\n'
+                f'Do not share this code with anyone.'
+            ),
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[email],
+            fail_silently=False,
+        )
+
+        print(f"✅ OTP sent to {email}")
+        return Response({'message': f'OTP sent to {email}'},
+                        status=status.HTTP_200_OK)
+
+    except Exception as e:
+        print(f"❌ OTP send failed: {e}")
+        return Response({'error': f'Failed to send OTP: {str(e)}'},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def verify_otp(request):
+    """
+    Verifies the OTP entered by the user against what's stored in cache.
+    Deletes from cache immediately on success.
+    """
+    email = request.data.get('email', '').strip()
+    otp   = request.data.get('otp', '').strip()
+
+    if not email or not otp:
+        return Response({'error': 'Email and OTP are required'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    cache_key   = f'otp_email_{email}'
+    stored_otp  = cache.get(cache_key)
+
+    if stored_otp is None:
+        return Response({'verified': False, 'error': 'OTP expired or not sent'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    if stored_otp != otp:
+        return Response({'verified': False, 'error': 'Incorrect OTP'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    # ✅ Correct — delete immediately so it can't be reused
+    cache.delete(cache_key)
+    print(f"✅ OTP verified for {email}")
+    return Response({'verified': True}, status=status.HTTP_200_OK)
 
 
 # ── AUTH ──────────────────────────────────────────────────────────────────────
@@ -187,6 +256,100 @@ def user_profile(request):
     return Response(serializer.data)
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def other_user_profile(request, user_id):
+    try:
+        target_user  = User.objects.get(id=user_id)
+        is_following = Follower.objects.filter(
+            follower=request.user, following=target_user).exists()
+        serializer   = OtherUserProfileSerializer(target_user)
+        data         = serializer.data
+        data['is_following']   = is_following
+        data['is_own_profile'] = (request.user.id == target_user.id)
+        return Response(data, status=status.HTTP_200_OK)
+    except User.DoesNotExist:
+        return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def follow_user(request, user_id):
+    try:
+        target_user = User.objects.get(id=user_id)
+        if target_user == request.user:
+            return Response({'error': 'Cannot follow yourself'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        follow, created = Follower.objects.get_or_create(
+            follower=request.user, following=target_user)
+        if not created:
+            follow.delete()
+            return Response({'following': False, 'message': 'Unfollowed'},
+                            status=status.HTTP_200_OK)
+        return Response({'following': True, 'message': 'Followed'},
+                        status=status.HTTP_200_OK)
+    except User.DoesNotExist:
+        return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ── GROUP ─────────────────────────────────────────────────────────────────────
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_group_details(request, group_id):
+    try:
+        group   = GroupDetails.objects.get(id=group_id)
+        members = []
+        for uid in group.members_list:
+            try:
+                user        = User.objects.get(id=uid)
+                user_detail = getattr(user, 'details', None)
+                members.append({
+                    'user_id':  user.id,
+                    'name':     user_detail.name if user_detail else
+                                f"{user.first_name} {user.last_name}".strip() or user.username,
+                    'email':    user.email,
+                    'is_admin': user.id == group.admin.id,
+                })
+            except User.DoesNotExist:
+                pass
+        return Response({
+            'group_id':   group.id,
+            'group_name': group.group_name,
+            'admin_id':   group.admin.id,
+            'members':    members,
+        }, status=status.HTTP_200_OK)
+    except GroupDetails.DoesNotExist:
+        return Response({'error': 'Group not found'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def rename_group(request, group_id):
+    try:
+        group = GroupDetails.objects.get(id=group_id)
+        if group.admin != request.user:
+            return Response({'error': 'Only admin can rename the group'},
+                            status=status.HTTP_403_FORBIDDEN)
+        new_name = request.data.get('group_name', '').strip()
+        if not new_name:
+            return Response({'error': 'Group name cannot be empty'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        group.group_name = new_name
+        group.save()
+        return Response({'group_name': group.group_name}, status=status.HTTP_200_OK)
+    except GroupDetails.DoesNotExist:
+        return Response({'error': 'Group not found'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 # ── TRIP FLOW ─────────────────────────────────────────────────────────────────
 
 @api_view(['POST'])
@@ -270,7 +433,8 @@ def save_payment(request):
         'ifsc':       details_map.get('ifsc')        if payment_method == 'Bank' else None,
     }
     try:
-        serializer = PaymentDetailsSerializer(PaymentDetails.objects.get(trip=trip), data=payment_data)
+        serializer = PaymentDetailsSerializer(
+            PaymentDetails.objects.get(trip=trip), data=payment_data)
     except PaymentDetails.DoesNotExist:
         serializer = PaymentDetailsSerializer(data=payment_data)
 
@@ -360,8 +524,10 @@ def search_trips(request):
                     start_str = trip.route.start_datetime.strftime('%d %b, %I:%M %p')
                 elif trip.start_date:
                     start_str = trip.start_date.strftime('%d %b')
-            vehicle_name = trip.vehicle_details.vehicle_model if hasattr(trip, 'vehicle_details') else trip.vehicle
-            price        = f"₹{trip.payment_info.price_per_head}" if hasattr(trip, 'payment_info') else '₹0'
+            vehicle_name = (trip.vehicle_details.vehicle_model
+                            if hasattr(trip, 'vehicle_details') else trip.vehicle)
+            price        = (f"₹{trip.payment_info.price_per_head}"
+                            if hasattr(trip, 'payment_info') else '₹0')
             max_capacity, is_registered, people_already = trip.passengers, False, 0
             try:
                 group          = GroupDetails.objects.get(trip=trip)
@@ -391,11 +557,13 @@ def confirm_join(request):
     try:
         trip, user = Trip.objects.get(id=trip_id), request.user
         if user.details.trips_registered and trip.id in user.details.trips_registered:
-            return Response({'error': 'You have already joined this trip.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'You have already joined this trip.'},
+                            status=status.HTTP_400_BAD_REQUEST)
         try:
             seat_info = SeatAvailability.objects.get(trip=trip)
         except SeatAvailability.DoesNotExist:
-            return Response({'error': 'Seat information missing.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({'error': 'Seat information missing.'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         if seat_info.available_seats <= 0:
             return Response({'error': 'Trip is full!'}, status=status.HTTP_400_BAD_REQUEST)
 
