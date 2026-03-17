@@ -5,7 +5,7 @@ from rest_framework import status
 from rest_framework.authtoken.models import Token
 import jwt
 from jwt import PyJWKClient
-from datetime import timedelta
+from datetime import timedelta, date
 from django.db import IntegrityError
 from django.contrib.auth.models import User
 from django.core.mail import send_mail
@@ -15,7 +15,7 @@ import random
 from .models import (
     Trip, Route, Vehicle, PaymentDetails,
     ContactDetails, GroupDetails, UserDetails, SeatAvailability,
-    Post, Follower,
+    Post, Follower, CompletedTrip
 )
 from .serializers import (
     UserProfileSerializer, OtherUserProfileSerializer,
@@ -25,7 +25,6 @@ from .serializers import (
 
 SUPABASE_JWKS_URL = 'https://tqmrytzypqsuxjwdrihh.supabase.co/auth/v1/.well-known/jwks.json'
 OTP_EXPIRY_SECONDS = 600  # 10 minutes
-
 
 def _verify_supabase_token(access_token: str) -> dict:
     try:
@@ -38,12 +37,10 @@ def _verify_supabase_token(access_token: str) -> dict:
             options={"verify_aud": False},
             leeway=timedelta(seconds=60),
         )
-        print(f"✅ JWT verified. User: {decoded.get('sub')}")
         return decoded
     except Exception as e:
         print(f"❌ JWT decode failed: {e}")
         raise
-
 
 def _extract_name(decoded: dict):
     meta      = decoded.get('user_metadata', {})
@@ -55,7 +52,6 @@ def _extract_name(decoded: dict):
         meta.get('first_name') or meta.get('given_name', ''),
         meta.get('last_name')  or meta.get('family_name', ''),
     )
-
 
 def _get_or_fix_user_details(user, supabase_uid, email, name):
     try:
@@ -94,20 +90,13 @@ def _get_or_fix_user_details(user, supabase_uid, email, name):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def send_otp(request):
-    """
-    Generates a 6-digit OTP, stores it in cache for 10 minutes,
-    and sends it to the provided email via Gmail SMTP.
-    """
     email = request.data.get('email', '').strip()
     if not email or '@' not in email:
-        return Response({'error': 'Valid email is required'},
-                        status=status.HTTP_400_BAD_REQUEST)
+        return Response({'error': 'Valid email is required'}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
         otp       = str(random.randint(100000, 999999))
         cache_key = f'otp_email_{email}'
-
-        # Store in cache — auto-deletes after OTP_EXPIRY_SECONDS
         cache.set(cache_key, otp, timeout=OTP_EXPIRY_SECONDS)
 
         send_mail(
@@ -121,49 +110,34 @@ def send_otp(request):
             recipient_list=[email],
             fail_silently=False,
         )
-
-        print(f"✅ OTP sent to {email}")
-        return Response({'message': f'OTP sent to {email}'},
-                        status=status.HTTP_200_OK)
-
+        return Response({'message': f'OTP sent to {email}'}, status=status.HTTP_200_OK)
     except Exception as e:
-        print(f"❌ OTP send failed: {e}")
-        return Response({'error': f'Failed to send OTP: {str(e)}'},
-                        status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({'error': f'Failed to send OTP: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def verify_otp(request):
-    """
-    Verifies the OTP entered by the user against what's stored in cache.
-    Deletes from cache immediately on success.
-    """
     email = request.data.get('email', '').strip()
     otp   = request.data.get('otp', '').strip()
 
     if not email or not otp:
-        return Response({'error': 'Email and OTP are required'},
-                        status=status.HTTP_400_BAD_REQUEST)
+        return Response({'error': 'Email and OTP are required'}, status=status.HTTP_400_BAD_REQUEST)
 
     cache_key   = f'otp_email_{email}'
     stored_otp  = cache.get(cache_key)
 
     if stored_otp is None:
-        return Response({'verified': False, 'error': 'OTP expired or not sent'},
-                        status=status.HTTP_400_BAD_REQUEST)
+        return Response({'verified': False, 'error': 'OTP expired or not sent'}, status=status.HTTP_400_BAD_REQUEST)
 
     if stored_otp != otp:
-        return Response({'verified': False, 'error': 'Incorrect OTP'},
-                        status=status.HTTP_400_BAD_REQUEST)
+        return Response({'verified': False, 'error': 'Incorrect OTP'}, status=status.HTTP_400_BAD_REQUEST)
 
-    # ✅ Correct — delete immediately so it can't be reused
     cache.delete(cache_key)
-    print(f"✅ OTP verified for {email}")
     return Response({'verified': True}, status=status.HTTP_200_OK)
 
 
-# ── AUTH ──────────────────────────────────────────────────────────────────────
+# ── AUTH & PROFILE ────────────────────────────────────────────────────────────
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -184,17 +158,13 @@ def signup(request):
             first_name, last_name = _extract_name(decoded)
 
         name = f"{first_name} {last_name}".strip() or email
-        print(f"👤 Signup: uid={supabase_uid} email={email} name={name}")
-
         user, _ = User.objects.get_or_create(
             username=supabase_uid,
             defaults={'email': email, 'first_name': first_name, 'last_name': last_name},
         )
-
         user_details = _get_or_fix_user_details(user, supabase_uid, email, name)
         token, _     = Token.objects.get_or_create(user=user)
 
-        print(f"✅ Signup success: user_id={user.id}")
         return Response({'key': token.key, 'user_id': user.id}, status=status.HTTP_201_CREATED)
 
     except jwt.ExpiredSignatureError:
@@ -202,7 +172,6 @@ def signup(request):
     except jwt.InvalidTokenError as e:
         return Response({'error': f'Invalid token: {e}'}, status=status.HTTP_401_UNAUTHORIZED)
     except Exception as e:
-        print(f"❌ Signup error: {e}")
         return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -210,7 +179,6 @@ def signup(request):
 @permission_classes([AllowAny])
 def login_view(request):
     access_token = request.data.get('access_token')
-
     if not access_token:
         return Response({'error': 'access_token is required'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -221,17 +189,14 @@ def login_view(request):
 
         first_name, last_name = _extract_name(decoded)
         name = f"{first_name} {last_name}".strip() or email
-        print(f"👤 Login: uid={supabase_uid} email={email} name={name}")
 
         user, created = User.objects.get_or_create(
             username=supabase_uid,
             defaults={'email': email, 'first_name': first_name, 'last_name': last_name},
         )
-
         user_details = _get_or_fix_user_details(user, supabase_uid, email, name)
         token, _     = Token.objects.get_or_create(user=user)
 
-        print(f"✅ Login success: user_id={user.id} created={created}")
         return Response({
             'key':        token.key,
             'user_id':    user.id,
@@ -245,15 +210,33 @@ def login_view(request):
     except jwt.InvalidTokenError as e:
         return Response({'error': f'Invalid token: {e}'}, status=status.HTTP_401_UNAUTHORIZED)
     except Exception as e:
-        print(f"❌ Login error: {e}")
         return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
-@api_view(['GET'])
+@api_view(['GET', 'PATCH'])
 @permission_classes([IsAuthenticated])
 def user_profile(request):
-    serializer = UserProfileSerializer(request.user)
-    return Response(serializer.data)
+    if request.method == 'GET':
+        serializer = UserProfileSerializer(request.user)
+        return Response(serializer.data)
+
+    if request.method == 'PATCH':
+        try:
+            user_details = request.user.details
+            bio             = request.data.get('bio')
+            profile_picture = request.data.get('profile_picture')
+
+            if bio is not None:
+                user_details.bio = bio
+            if profile_picture is not None:
+                user_details.profile_picture = profile_picture
+
+            user_details.save()
+            return Response({'message': 'Profile updated successfully'}, status=status.HTTP_200_OK)
+        except UserDetails.DoesNotExist:
+            return Response({'error': 'User details not found'}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])
@@ -264,32 +247,57 @@ def other_user_profile(request, user_id):
         is_following = Follower.objects.filter(
             follower=request.user, following=target_user).exists()
         serializer   = OtherUserProfileSerializer(target_user)
-        data         = serializer.data
-        data['is_following']   = is_following
-        data['is_own_profile'] = (request.user.id == target_user.id)
-        return Response(data, status=status.HTTP_200_OK)
+        
+        # --- THE FIX ---
+        # Convert the immutable ReturnDict into a standard, editable dictionary
+        response_data = dict(serializer.data)
+        
+        # Get posts with trip details
+        posts = Post.objects.filter(user=target_user).select_related('trip').order_by('-created_at')
+        posts_data = []
+        for post in posts:
+            post_data = {
+                'id': post.id,
+                'image_url': post.image_url,
+                'caption': post.caption,
+                'created_at': post.created_at,
+                'trip': {
+                    'id': post.trip.id,
+                    'destination': post.trip.destination,
+                    'start_date': post.trip.start_date,
+                    'end_date': post.trip.end_date
+                } if post.trip else None
+            }
+            posts_data.append(post_data)
+        
+        # Now we can safely add our custom fields
+        response_data['posts']          = posts_data
+        response_data['is_following']   = is_following
+        response_data['is_own_profile'] = (request.user.id == target_user.id)
+        
+        return Response(response_data, status=status.HTTP_200_OK)
+
     except User.DoesNotExist:
         return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
+        # Added a traceback print here so if a 500 ever happens again, 
+        # it prints the exact line of the error in your terminal!
+        import traceback
+        traceback.print_exc()
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
+    
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def follow_user(request, user_id):
     try:
         target_user = User.objects.get(id=user_id)
         if target_user == request.user:
-            return Response({'error': 'Cannot follow yourself'},
-                            status=status.HTTP_400_BAD_REQUEST)
-        follow, created = Follower.objects.get_or_create(
-            follower=request.user, following=target_user)
+            return Response({'error': 'Cannot follow yourself'}, status=status.HTTP_400_BAD_REQUEST)
+        follow, created = Follower.objects.get_or_create(follower=request.user, following=target_user)
         if not created:
             follow.delete()
-            return Response({'following': False, 'message': 'Unfollowed'},
-                            status=status.HTTP_200_OK)
-        return Response({'following': True, 'message': 'Followed'},
-                        status=status.HTTP_200_OK)
+            return Response({'following': False, 'message': 'Unfollowed'}, status=status.HTTP_200_OK)
+        return Response({'following': True, 'message': 'Followed'}, status=status.HTTP_200_OK)
     except User.DoesNotExist:
         return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
@@ -328,19 +336,16 @@ def get_group_details(request, group_id):
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-
 @api_view(['PATCH'])
 @permission_classes([IsAuthenticated])
 def rename_group(request, group_id):
     try:
         group = GroupDetails.objects.get(id=group_id)
         if group.admin != request.user:
-            return Response({'error': 'Only admin can rename the group'},
-                            status=status.HTTP_403_FORBIDDEN)
+            return Response({'error': 'Only admin can rename the group'}, status=status.HTTP_403_FORBIDDEN)
         new_name = request.data.get('group_name', '').strip()
         if not new_name:
-            return Response({'error': 'Group name cannot be empty'},
-                            status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'Group name cannot be empty'}, status=status.HTTP_400_BAD_REQUEST)
         group.group_name = new_name
         group.save()
         return Response({'group_name': group.group_name}, status=status.HTTP_200_OK)
@@ -358,8 +363,7 @@ def save_trip(request):
     serializer = TripSerializer(data=request.data)
     if serializer.is_valid():
         trip = serializer.save(user=request.user)
-        SeatAvailability.objects.create(
-            trip=trip, total_seats=trip.passengers, available_seats=trip.passengers)
+        SeatAvailability.objects.create(trip=trip, total_seats=trip.passengers, available_seats=trip.passengers)
         try:
             user_details = request.user.details
             current_list = list(user_details.trips_registered)
@@ -369,10 +373,8 @@ def save_trip(request):
                 user_details.save()
         except UserDetails.DoesNotExist:
             pass
-        return Response({'message': 'Trip saved successfully', 'trip_id': trip.id},
-                        status=status.HTTP_201_CREATED)
+        return Response({'message': 'Trip saved successfully', 'trip_id': trip.id}, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -410,7 +412,6 @@ def save_route(request):
         return Response({'message': 'Route and Vehicle details saved!'}, status=status.HTTP_200_OK)
     return Response(status=status.HTTP_400_BAD_REQUEST)
 
-
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def save_payment(request):
@@ -430,11 +431,10 @@ def save_payment(request):
         'payment_method':   payment_method,
         'upi_id':     details_map.get('upi_id')     if payment_method == 'UPI'  else None,
         'account_no': details_map.get('account_no') if payment_method == 'Bank' else None,
-        'ifsc':       details_map.get('ifsc')        if payment_method == 'Bank' else None,
+        'ifsc':       details_map.get('ifsc')       if payment_method == 'Bank' else None,
     }
     try:
-        serializer = PaymentDetailsSerializer(
-            PaymentDetails.objects.get(trip=trip), data=payment_data)
+        serializer = PaymentDetailsSerializer(PaymentDetails.objects.get(trip=trip), data=payment_data)
     except PaymentDetails.DoesNotExist:
         serializer = PaymentDetailsSerializer(data=payment_data)
 
@@ -442,7 +442,6 @@ def save_payment(request):
         serializer.save()
         return Response({'message': 'Payment details saved!'}, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -460,8 +459,7 @@ def save_contact(request):
         'is_email_verified': data.get('is_email_verified', False),
     }
     try:
-        contact_serializer = ContactDetailsSerializer(
-            ContactDetails.objects.get(trip=trip), data=contact_data)
+        contact_serializer = ContactDetailsSerializer(ContactDetails.objects.get(trip=trip), data=contact_data)
     except ContactDetails.DoesNotExist:
         contact_serializer = ContactDetailsSerializer(data=contact_data)
 
@@ -557,13 +555,11 @@ def confirm_join(request):
     try:
         trip, user = Trip.objects.get(id=trip_id), request.user
         if user.details.trips_registered and trip.id in user.details.trips_registered:
-            return Response({'error': 'You have already joined this trip.'},
-                            status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'You have already joined this trip.'}, status=status.HTTP_400_BAD_REQUEST)
         try:
             seat_info = SeatAvailability.objects.get(trip=trip)
         except SeatAvailability.DoesNotExist:
-            return Response({'error': 'Seat information missing.'},
-                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({'error': 'Seat information missing.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         if seat_info.available_seats <= 0:
             return Response({'error': 'Trip is full!'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -595,3 +591,92 @@ def confirm_join(request):
         return Response({'error': 'Group not found'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_completed_trips(request):
+    try:
+        user = request.user
+        try:
+            user_details = user.details
+        except UserDetails.DoesNotExist:
+            return Response([], status=status.HTTP_200_OK)
+
+        trip_ids = user_details.trips_registered or []
+        trips = Trip.objects.filter(id__in=trip_ids)
+        completed_list = []
+
+        for trip in trips:
+            if trip.end_date:
+                CompletedTrip.objects.get_or_create(
+                    user=user,
+                    trip=trip,
+                    defaults={
+                        "destination": trip.destination,
+                        "start_date": trip.start_date,
+                        "end_date": trip.end_date,
+                    }
+                )
+                completed_list.append({
+                    "trip_id": trip.id,
+                    "destination": trip.destination,
+                    "start_date": trip.start_date,
+                    "end_date": trip.end_date
+                })
+
+        return Response(completed_list, status=status.HTTP_200_OK)
+    except Exception as e:
+        print("COMPLETED TRIPS ERROR:", e)
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ── POSTS (ALBUMS) ────────────────────────────────────────────────────────────
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_post(request):
+    user = request.user
+    trip_id = request.data.get("trip_id")
+    images = request.data.get("images", [])
+
+    try:
+        trip = Trip.objects.get(id=trip_id)
+    except Trip.DoesNotExist:
+        return Response({"error": "Trip not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    created_posts = []
+    for img in images:
+        post = Post.objects.create(
+            user=user,
+            trip=trip,
+            image_url=img,
+        )
+        created_posts.append({
+            "id": post.id,
+            "image_url": post.image_url,
+            "trip": {
+                "id": trip.id,
+                "destination": trip.destination,
+                "start_date": trip.start_date,
+                "end_date": trip.end_date
+            }
+        })
+
+    return Response({
+        "message": "Post created",
+        "posts": created_posts
+    }, status=status.HTTP_200_OK)
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_post(request, post_id):
+    try:
+        post = Post.objects.get(id=post_id, user=request.user)
+        # Optional: Delete from Supabase storage (handled safely on the front end usually)
+        post.delete()
+        return Response({"message": "Post deleted successfully"}, status=status.HTTP_200_OK)
+    except Post.DoesNotExist:
+        return Response({"error": "Post not found"}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

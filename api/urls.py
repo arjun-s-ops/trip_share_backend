@@ -23,8 +23,13 @@ urlpatterns = [
     path('savetrip/my-trips/',            views.get_user_trips),
     path('trips/search/',                 views.search_trips),
     path('trips/join/confirm/',           views.confirm_join),
+    path('trips/completed/',              views.get_completed_trips),
 
     # Group
     path('groups/<int:group_id>/',        views.get_group_details),
     path('groups/<int:group_id>/rename/', views.rename_group),
+
+    # Posts (Albums)
+    path('posts/create/',                 views.create_post),
+    path('posts/<int:post_id>/',          views.delete_post, name='delete_post'),
 ]

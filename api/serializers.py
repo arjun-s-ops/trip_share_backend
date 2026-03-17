@@ -5,34 +5,39 @@ from .models import (
     ContactDetails, GroupDetails, UserDetails, Post, Follower,
 )
 
-
 class UserDetailsSerializer(serializers.ModelSerializer):
     class Meta:
         model  = UserDetails
-        fields = ['name', 'email', 'phone', 'trips_registered', 'trips_success']
-
+        fields = ['name', 'email', 'phone', 'bio', 'profile_picture', 'trips_registered', 'trips_success']
 
 class UserProfileSerializer(serializers.ModelSerializer):
-    details    = UserDetailsSerializer(read_only=True)
-    post_count = serializers.SerializerMethodField()
-    bio        = serializers.SerializerMethodField()
+    details         = UserDetailsSerializer(read_only=True)
+    post_count      = serializers.SerializerMethodField()
+    bio             = serializers.SerializerMethodField()
+    profile_picture = serializers.SerializerMethodField()
 
     class Meta:
         model  = User
-        fields = ['id', 'email', 'first_name', 'last_name', 'details', 'post_count', 'bio']
+        fields = ['id', 'email', 'first_name', 'last_name', 'details', 'post_count', 'bio', 'profile_picture']
 
     def get_post_count(self, obj):
         return obj.posts.count()
 
     def get_bio(self, obj):
-        return ''
+        return obj.details.bio if hasattr(obj, 'details') else ''
 
+    def get_profile_picture(self, obj):
+        return obj.details.profile_picture if hasattr(obj, 'details') else None
 
 class PostSerializer(serializers.ModelSerializer):
+    trip_destination = serializers.CharField(source='trip.destination', read_only=True)
+    trip_start_date  = serializers.DateField(source='trip.start_date', read_only=True)
+    trip_end_date    = serializers.DateField(source='trip.end_date', read_only=True)
+    
     class Meta:
         model  = Post
-        fields = ['id', 'image_url', 'caption', 'created_at']
-
+        fields = ['id', 'image_url', 'caption', 'created_at', 'trip', 
+                  'trip_destination', 'trip_start_date', 'trip_end_date']
 
 class OtherUserProfileSerializer(serializers.ModelSerializer):
     name            = serializers.SerializerMethodField()
@@ -43,6 +48,10 @@ class OtherUserProfileSerializer(serializers.ModelSerializer):
     trips           = serializers.SerializerMethodField()
     follower_count  = serializers.SerializerMethodField()
     following_count = serializers.SerializerMethodField()
+    
+    # ── ADDED FIELDS ──
+    bio             = serializers.SerializerMethodField()
+    profile_picture = serializers.SerializerMethodField()
 
     class Meta:
         model  = User
@@ -51,6 +60,7 @@ class OtherUserProfileSerializer(serializers.ModelSerializer):
             'post_count', 'posts',
             'trip_count', 'trips',
             'follower_count', 'following_count',
+            'bio', 'profile_picture', # ── ADDED TO PAYLOAD ──
         ]
 
     def get_name(self, obj):
@@ -84,24 +94,27 @@ class OtherUserProfileSerializer(serializers.ModelSerializer):
     def get_following_count(self, obj):
         return obj.following.count()
 
+    # ── ADDED GETTER METHODS ──
+    def get_bio(self, obj):
+        return obj.details.bio if hasattr(obj, 'details') else ''
+
+    def get_profile_picture(self, obj):
+        return obj.details.profile_picture if hasattr(obj, 'details') else None
 
 class TripSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Trip
         fields = ['id', 'destination', 'start_date', 'end_date', 'vehicle', 'passengers']
 
-
 class RouteSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Route
         fields = ['trip', 'start_location', 'stops', 'start_datetime', 'end_datetime']
 
-
 class VehicleSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Vehicle
         fields = ['trip', 'vehicle_number', 'vehicle_model']
-
 
 class PaymentDetailsSerializer(serializers.ModelSerializer):
     class Meta:
@@ -112,12 +125,10 @@ class PaymentDetailsSerializer(serializers.ModelSerializer):
             'payment_method', 'upi_id', 'account_no', 'ifsc',
         ]
 
-
 class ContactDetailsSerializer(serializers.ModelSerializer):
     class Meta:
         model  = ContactDetails
         fields = ['trip', 'phone', 'email', 'is_phone_verified', 'is_email_verified']
-
 
 class GroupDetailsSerializer(serializers.ModelSerializer):
     class Meta:

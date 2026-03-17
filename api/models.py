@@ -1,13 +1,14 @@
 from django.db import models
 from django.contrib.auth.models import User
 
-
 class UserDetails(models.Model):
     user             = models.OneToOneField(User, on_delete=models.CASCADE, related_name='details')
     supabase_uid     = models.CharField(max_length=128, unique=True)
     name             = models.CharField(max_length=255)
     email            = models.EmailField(unique=True)
     phone            = models.CharField(max_length=15, blank=True, null=True)
+    bio              = models.TextField(blank=True, default="")
+    profile_picture  = models.TextField(blank=True, null=True)
     trips_registered = models.JSONField(default=list, blank=True)
     trips_success    = models.JSONField(default=list, blank=True)
     created_at       = models.DateTimeField(auto_now_add=True)
@@ -17,7 +18,6 @@ class UserDetails(models.Model):
 
     def __str__(self):
         return self.name
-
 
 class Trip(models.Model):
     user        = models.ForeignKey(User, on_delete=models.CASCADE)
@@ -32,7 +32,6 @@ class Trip(models.Model):
     class Meta:
         db_table = 'trip_details'
 
-
 class Route(models.Model):
     trip           = models.OneToOneField(Trip, on_delete=models.CASCADE)
     start_location = models.CharField(max_length=255)
@@ -43,7 +42,6 @@ class Route(models.Model):
     class Meta:
         db_table = 'route_details'
 
-
 class Vehicle(models.Model):
     trip           = models.OneToOneField(Trip, on_delete=models.CASCADE, related_name='vehicle_details')
     vehicle_number = models.CharField(max_length=20)
@@ -51,7 +49,6 @@ class Vehicle(models.Model):
 
     class Meta:
         db_table = 'vehicle_details'
-
 
 class PaymentDetails(models.Model):
     trip             = models.OneToOneField(Trip, on_delete=models.CASCADE, related_name='payment_info')
@@ -67,7 +64,6 @@ class PaymentDetails(models.Model):
     class Meta:
         db_table = 'payment_details'
 
-
 class ContactDetails(models.Model):
     trip              = models.OneToOneField(Trip, on_delete=models.CASCADE, related_name='contact_info')
     phone             = models.CharField(max_length=15)
@@ -78,7 +74,6 @@ class ContactDetails(models.Model):
 
     class Meta:
         db_table = 'contact_details'
-
 
 class GroupDetails(models.Model):
     trip          = models.OneToOneField(Trip, on_delete=models.CASCADE, related_name='group_info')
@@ -91,7 +86,6 @@ class GroupDetails(models.Model):
     class Meta:
         db_table = 'group_details'
 
-
 class SeatAvailability(models.Model):
     trip            = models.OneToOneField(Trip, on_delete=models.CASCADE, related_name='seat_info')
     total_seats     = models.IntegerField()
@@ -100,9 +94,9 @@ class SeatAvailability(models.Model):
     class Meta:
         db_table = 'remaining_seats'
 
-
 class Post(models.Model):
     user       = models.ForeignKey(User, on_delete=models.CASCADE, related_name='posts')
+    trip       = models.ForeignKey(Trip, on_delete=models.CASCADE, related_name='posts', null=True, blank=True)
     image_url  = models.TextField()
     caption    = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -112,8 +106,7 @@ class Post(models.Model):
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"Post by {self.user.username}"
-
+        return f"Post by {self.user.username} - {self.trip.destination if self.trip else 'No trip'}"
 
 class Follower(models.Model):
     follower   = models.ForeignKey(User, on_delete=models.CASCADE, related_name='following')
@@ -121,8 +114,22 @@ class Follower(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table      = 'followers'
+        db_table        = 'followers'
         unique_together = ('follower', 'following')
 
     def __str__(self):
         return f"{self.follower.username} → {self.following.username}"
+
+class CompletedTrip(models.Model):
+    user        = models.ForeignKey(User, on_delete=models.CASCADE)
+    trip        = models.ForeignKey(Trip, on_delete=models.CASCADE)
+    destination = models.CharField(max_length=255)
+    start_date  = models.DateField()
+    end_date    = models.DateField()
+    created_at  = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "completed_trips"
+
+    def __str__(self):
+        return f"{self.user.username} - {self.destination}"
