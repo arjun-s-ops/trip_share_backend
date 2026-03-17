@@ -32,4 +32,9 @@ urlpatterns = [
     # Posts (Albums)
     path('posts/create/',                 views.create_post),
     path('posts/<int:post_id>/',          views.delete_post, name='delete_post'),
+
+    #Notifications
+    path('notifications/',          views.get_notifications, name='get_notifications'),
+    path('notifications/read/<int:pk>/', views.mark_notification_read, name='mark_read'),
+    path('notifications/read-all/', views.mark_all_read, name='mark_all_read'),
 ]

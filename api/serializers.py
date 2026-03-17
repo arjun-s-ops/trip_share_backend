@@ -1,5 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
+from .models import Notification
+from django.contrib.contenttypes.models import ContentType
 from .models import (
     Trip, Route, Vehicle, PaymentDetails,
     ContactDetails, GroupDetails, UserDetails, Post, Follower,
@@ -134,3 +136,54 @@ class GroupDetailsSerializer(serializers.ModelSerializer):
     class Meta:
         model  = GroupDetails
         fields = ['id', 'trip', 'group_name', 'admin', 'members_count', 'members_list']
+
+
+# serializers.py
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    actor_name    = serializers.CharField(source='actor.details.name', read_only=True)
+    actor_id      = serializers.IntegerField(source='actor.id', read_only=True)
+    actor_avatar  = serializers.CharField(source='actor.details.profile_picture', read_only=True)
+    target_type   = serializers.SerializerMethodField()
+    target_id     = serializers.SerializerMethodField()
+    target_details = serializers.SerializerMethodField()
+    time_ago      = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Notification
+        fields = [
+            'id', 'actor_id', 'actor_name', 'actor_avatar', 'verb',
+            'target_type', 'target_id', 'target_details',
+            'read', 'timestamp', 'time_ago'
+        ]
+
+    def get_target_type(self, obj):
+        if obj.target:
+            return obj.target._meta.model_name   # e.g., 'trip', 'post'
+        return None
+
+    def get_target_id(self, obj):
+        return obj.target_object_id if obj.target else None
+
+    def get_target_details(self, obj):
+        # Return minimal info about the target object (trip destination, post image, etc.)
+        if not obj.target:
+            return None
+        if obj.target._meta.model_name == 'trip':
+            return {
+                'destination': obj.target.destination,
+                'start_date': obj.target.start_date,
+            }
+        elif obj.target._meta.model_name == 'post':
+            return {
+                'image_url': obj.target.image_url,
+                'caption': obj.target.caption[:50],
+            }
+        # Add other models as needed
+        return None
+
+    def get_time_ago(self, obj):
+        from django.utils.timesince import timesince
+        from django.utils.timezone import now
+        return timesince(obj.timestamp, now())

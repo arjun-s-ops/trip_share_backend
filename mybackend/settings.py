@@ -8,7 +8,7 @@ DEBUG      = config('DEBUG', cast=bool)
 
 ALLOWED_HOSTS = [
     '10.70.253.228', 'localhost', '127.0.0.1',
-    '192.168.0.100', '192.168.0.105', '192.168.11.69',
+    '192.168.0.100', '192.168.0.105', '192.168.1.52',
 ]
 
 INSTALLED_APPS = [
@@ -109,3 +109,17 @@ DEFAULT_FROM_EMAIL  = config('EMAIL_HOST_USER')
 # ── Supabase ──────────────────────────────────────────────────────────────────
 SUPABASE_URL        = config('SUPABASE_URL')
 SUPABASE_JWT_SECRET = config('SUPABASE_JWT_SECRET')
+
+
+INSTALLED_APPS += ['channels']
+
+ASGI_APPLICATION = 'mybackend.asgi.application'
+
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels_redis.core.RedisChannelLayer',
+        'CONFIG': {
+            "hosts": [('127.0.0.1', 6379)],
+        },
+    },
+}
