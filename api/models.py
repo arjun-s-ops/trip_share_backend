@@ -28,6 +28,7 @@ class Trip(models.Model):
     passengers  = models.IntegerField()
     created_at  = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)
+    status = models.CharField(max_length=20, default='active')
 
     class Meta:
         db_table = 'trip_details'

@@ -24,7 +24,7 @@ from .models import (
 from .serializers import (
     UserProfileSerializer, OtherUserProfileSerializer,
     TripSerializer, RouteSerializer, VehicleSerializer,
-    PaymentDetailsSerializer, ContactDetailsSerializer, 
+    PaymentDetailsSerializer, ContactDetailsSerializer,
     GroupDetailsSerializer, NotificationSerializer
 )
 
@@ -61,7 +61,7 @@ def _extract_name(decoded: dict):
 
 def _get_or_fix_user_details(user, supabase_uid, email, name):
     details, created = UserDetails.objects.get_or_create(
-        user=user, 
+        user=user,
         defaults={'supabase_uid': supabase_uid, 'email': email, 'name': name}
     )
     if not created and (details.supabase_uid != supabase_uid or details.email != email):
@@ -71,9 +71,7 @@ def _get_or_fix_user_details(user, supabase_uid, email, name):
     return details
 
 
-
-
-# Add these missing view functions after your existing helpers and before the OTP section
+# ── TRIP CREATION FLOW ────────────────────────────────────────────────────────
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -81,7 +79,7 @@ def save_route(request):
     """Save route details for a trip"""
     data = request.data
     trip_id = data.get('trip_id')
-    
+
     try:
         trip = Trip.objects.get(id=trip_id, user=request.user)
     except Trip.DoesNotExist:
@@ -94,7 +92,7 @@ def save_route(request):
         'start_datetime': data.get('start_datetime'),
         'end_datetime': data.get('end_datetime'),
     }
-    
+
     vehicle_data = {
         'trip': trip.id,
         'vehicle_number': data.get('vehicle_number'),
@@ -115,7 +113,7 @@ def save_route(request):
         route_serializer.save()
         vehicle_serializer.save()
         return Response({'message': 'Route and Vehicle details saved!'}, status=status.HTTP_200_OK)
-    
+
     errors = {}
     if not route_serializer.is_valid():
         errors.update(route_serializer.errors)
@@ -132,7 +130,7 @@ def save_payment(request):
     trip_id = data.get('trip_id')
     payment_method = data.get('payment_method')
     details_map = data.get('payment_details', {})
-    
+
     try:
         trip = Trip.objects.get(id=trip_id, user=request.user)
     except Trip.DoesNotExist:
@@ -148,7 +146,7 @@ def save_payment(request):
         'account_no': details_map.get('account_no') if payment_method == 'Bank' else None,
         'ifsc': details_map.get('ifsc') if payment_method == 'Bank' else None,
     }
-    
+
     try:
         serializer = PaymentDetailsSerializer(PaymentDetails.objects.get(trip=trip), data=payment_data)
     except PaymentDetails.DoesNotExist:
@@ -166,7 +164,7 @@ def save_contact(request):
     """Save contact details for a trip and publish it"""
     data = request.data
     trip_id = data.get('trip_id')
-    
+
     try:
         trip = Trip.objects.get(id=trip_id, user=request.user)
     except Trip.DoesNotExist:
@@ -179,7 +177,7 @@ def save_contact(request):
         'is_phone_verified': data.get('is_phone_verified', False),
         'is_email_verified': data.get('is_email_verified', False),
     }
-    
+
     try:
         contact_serializer = ContactDetailsSerializer(ContactDetails.objects.get(trip=trip), data=contact_data)
     except ContactDetails.DoesNotExist:
@@ -187,8 +185,7 @@ def save_contact(request):
 
     if contact_serializer.is_valid():
         contact_serializer.save()
-        
-        # Create group for the trip
+
         group, _ = GroupDetails.objects.get_or_create(
             trip=trip,
             defaults={
@@ -198,27 +195,29 @@ def save_contact(request):
                 'members_list': [request.user.id],
             },
         )
-        
+
         return Response({
             'message': 'Trip Published & Group Created!',
             'group_id': group.id,
             'group_name': group.group_name
         }, status=status.HTTP_201_CREATED)
-    
+
     return Response(contact_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+
+# ── DATA RETRIEVAL ────────────────────────────────────────────────────────────
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_user_trips(request):
-    """Get all trips the user has joined"""
+    """Get all trips the user has joined (for group/chat view)"""
     try:
         user_details = request.user.details
         registered_ids = user_details.trips_registered or []
-        
+
         if not registered_ids:
             return Response([], status=status.HTTP_200_OK)
-        
+
         results = []
         for trip in Trip.objects.filter(id__in=registered_ids):
             try:
@@ -230,7 +229,7 @@ def get_user_trips(request):
                 group_name = f"Trip to {trip.destination}"
                 group_id = None
                 admin_id = None
-            
+
             results.append({
                 'group_name': group_name,
                 'group_id': group_id,
@@ -240,13 +239,41 @@ def get_user_trips(request):
                 'last_message': f"Trip to {trip.destination} is confirmed!",
                 'time': 'Just now',
             })
-        
+
         return Response(results, status=status.HTTP_200_OK)
-    
+
     except UserDetails.DoesNotExist:
         return Response({'error': 'User details not found'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_all_user_trips(request):
+    """Get all trips the user is part of — ongoing + completed (for post creation)"""
+    try:
+        user_details = request.user.details
+        trip_ids = user_details.trips_registered or []
+
+        if not trip_ids:
+            return Response([], status=status.HTTP_200_OK)
+
+        results = []
+        for trip in Trip.objects.filter(id__in=trip_ids):
+            results.append({
+                'trip_id': trip.id,
+                'destination': trip.destination,
+                'start_date': str(trip.start_date),
+                'end_date': str(trip.end_date),
+            })
+
+        return Response(results, status=status.HTTP_200_OK)
+
+    except UserDetails.DoesNotExist:
+        return Response([], status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])
@@ -256,13 +283,11 @@ def search_trips(request):
     try:
         trips = Trip.objects.exclude(user=request.user).order_by('-created_at')
         results = []
-        
+
         for trip in trips:
-            # Skip trips without required related objects
             if not hasattr(trip, 'payment_info') or not hasattr(trip, 'route'):
                 continue
-            
-            # Format start info
+
             start_str = 'Date not set'
             start_location = 'Unknown'
             if hasattr(trip, 'route'):
@@ -271,18 +296,14 @@ def search_trips(request):
                     start_str = trip.route.start_datetime.strftime('%d %b, %I:%M %p')
                 elif trip.start_date:
                     start_str = trip.start_date.strftime('%d %b')
-            
-            # Vehicle info
+
             vehicle_name = trip.vehicle_details.vehicle_model if hasattr(trip, 'vehicle_details') else trip.vehicle
-            
-            # Price
             price = f"₹{trip.payment_info.price_per_head}" if hasattr(trip, 'payment_info') else '₹0'
-            
-            # Group info
+
             max_capacity = trip.passengers
             is_registered = False
             people_already = 0
-            
+
             try:
                 group = GroupDetails.objects.get(trip=trip)
                 people_already = max(0, group.members_count - 1)
@@ -290,10 +311,9 @@ def search_trips(request):
                     is_registered = True
             except GroupDetails.DoesNotExist:
                 pass
-            
-            # Driver name
+
             driver_name = trip.user.details.name if hasattr(trip.user, 'details') else (trip.user.first_name or trip.user.username)
-            
+
             results.append({
                 'id': trip.id,
                 'destination': trip.destination,
@@ -308,9 +328,9 @@ def search_trips(request):
                 'from': start_location,
                 'is_joined': is_registered,
             })
-        
+
         return Response(results, status=status.HTTP_200_OK)
-    
+
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -349,11 +369,13 @@ def get_completed_trips(request):
                 })
 
         return Response(completed_list, status=status.HTTP_200_OK)
-    
+
     except Exception as e:
         print("COMPLETED TRIPS ERROR:", e)
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+# ── GROUP ─────────────────────────────────────────────────────────────────────
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -362,7 +384,7 @@ def get_group_details(request, group_id):
     try:
         group = GroupDetails.objects.get(id=group_id)
         members = []
-        
+
         for uid in group.members_list:
             try:
                 user = User.objects.get(id=uid)
@@ -375,14 +397,14 @@ def get_group_details(request, group_id):
                 })
             except User.DoesNotExist:
                 pass
-        
+
         return Response({
             'group_id': group.id,
             'group_name': group.group_name,
             'admin_id': group.admin.id,
             'members': members,
         }, status=status.HTTP_200_OK)
-    
+
     except GroupDetails.DoesNotExist:
         return Response({'error': 'Group not found'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
@@ -395,24 +417,26 @@ def rename_group(request, group_id):
     """Rename a group (admin only)"""
     try:
         group = GroupDetails.objects.get(id=group_id)
-        
+
         if group.admin != request.user:
             return Response({'error': 'Only admin can rename the group'}, status=status.HTTP_403_FORBIDDEN)
-        
+
         new_name = request.data.get('group_name', '').strip()
         if not new_name:
             return Response({'error': 'Group name cannot be empty'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
         group.group_name = new_name
         group.save()
-        
+
         return Response({'group_name': group.group_name}, status=status.HTTP_200_OK)
-    
+
     except GroupDetails.DoesNotExist:
         return Response({'error': 'Group not found'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+# ── POSTS ─────────────────────────────────────────────────────────────────────
 
 @api_view(['DELETE'])
 @permission_classes([IsAuthenticated])
@@ -422,12 +446,54 @@ def delete_post(request, post_id):
         post = Post.objects.get(id=post_id, user=request.user)
         post.delete()
         return Response({"message": "Post deleted successfully"}, status=status.HTTP_200_OK)
-    
+
     except Post.DoesNotExist:
         return Response({"error": "Post not found"}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_post(request):
+    trip_id = request.data.get("trip_id")
+    images = request.data.get("images", [])
+
+    try:
+        trip = Trip.objects.get(id=trip_id)
+    except Trip.DoesNotExist:
+        return Response({"error": "Trip not found"}, status=404)
+
+    try:
+        group = GroupDetails.objects.get(trip=trip)
+    except GroupDetails.DoesNotExist:
+        return Response({"error": "Group not found"}, status=404)
+
+    created_posts = []
+    for img in images:
+        post = Post.objects.create(user=request.user, trip=trip, image_url=img)
+        created_posts.append({"id": post.id, "image_url": post.image_url})
+
+    # Notify ALL members except the poster
+    member_ids = [m for m in group.members_list if m != request.user.id]
+    members = User.objects.filter(id__in=member_ids)
+
+    notifications = []
+    for m in members:
+        notifications.append(
+            Notification(recipient=m, actor=request.user, verb='posted in your trip', target=trip)
+        )
+
+    if notifications:
+        Notification.objects.bulk_create(notifications)
+        print(f"✅ Post notifications created: {len(notifications)} members notified for trip {trip.id}")
+    else:
+        print(f"⚠️ No members to notify for trip {trip.id} (member_ids: {member_ids})")
+
+    return Response({"message": "Posts created", "posts": created_posts})
+
+
+# ── NOTIFICATIONS ─────────────────────────────────────────────────────────────
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -458,6 +524,47 @@ def mark_all_read(request):
     Notification.objects.filter(recipient=request.user, read=False).update(read=True)
     return Response({'status': 'all marked read'})
 
+
+# ── OTP ───────────────────────────────────────────────────────────────────────
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def send_otp(request):
+    email = request.data.get('email', '').strip()
+    if not email or '@' not in email:
+        return Response({'error': 'Valid email is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        otp = str(random.randint(100000, 999999))
+        cache.set(f'otp_email_{email}', otp, timeout=OTP_EXPIRY_SECONDS)
+
+        send_mail(
+            subject='Your TripShare Verification Code',
+            message=f'Your verification code is: {otp}\n\nValid for 10 minutes.',
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[email],
+            fail_silently=False,
+        )
+        return Response({'message': f'OTP sent to {email}'}, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def verify_otp(request):
+    email = request.data.get('email', '').strip()
+    otp = request.data.get('otp', '').strip()
+    cache_key = f'otp_email_{email}'
+    stored_otp = cache.get(cache_key)
+
+    if stored_otp and stored_otp == otp:
+        cache.delete(cache_key)
+        return Response({'verified': True}, status=status.HTTP_200_OK)
+    return Response({'verified': False, 'error': 'Invalid or expired OTP'}, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ── AUTH & PROFILE ────────────────────────────────────────────────────────────
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -490,7 +597,6 @@ def signup(request):
 
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-    
 
 
 @api_view(['GET', 'PATCH'])
@@ -501,7 +607,6 @@ def user_profile(request):
         serializer = UserProfileSerializer(request.user)
         return Response(serializer.data)
 
-    # PATCH method
     try:
         user_details = request.user.details
         bio = request.data.get('bio')
@@ -516,48 +621,7 @@ def user_profile(request):
         return Response({'message': 'Profile updated successfully'}, status=status.HTTP_200_OK)
     except UserDetails.DoesNotExist:
         return Response({'error': 'User details not found'}, status=status.HTTP_404_NOT_FOUND)
-    
 
-
-
-# ── OTP ───────────────────────────────────────────────────────────────────────
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def send_otp(request):
-    email = request.data.get('email', '').strip()
-    if not email or '@' not in email:
-        return Response({'error': 'Valid email is required'}, status=status.HTTP_400_BAD_REQUEST)
-
-    try:
-        otp = str(random.randint(100000, 999999))
-        cache.set(f'otp_email_{email}', otp, timeout=OTP_EXPIRY_SECONDS)
-
-        send_mail(
-            subject='Your TripShare Verification Code',
-            message=f'Your verification code is: {otp}\n\nValid for 10 minutes.',
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
-            fail_silently=False,
-        )
-        return Response({'message': f'OTP sent to {email}'}, status=status.HTTP_200_OK)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def verify_otp(request):
-    email = request.data.get('email', '').strip()
-    otp = request.data.get('otp', '').strip()
-    cache_key = f'otp_email_{email}'
-    stored_otp = cache.get(cache_key)
-
-    if stored_otp and stored_otp == otp:
-        cache.delete(cache_key)
-        return Response({'verified': True}, status=status.HTTP_200_OK)
-    return Response({'verified': False, 'error': 'Invalid or expired OTP'}, status=status.HTTP_400_BAD_REQUEST)
-
-# ── AUTH & PROFILE ────────────────────────────────────────────────────────────
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -571,7 +635,7 @@ def login_view(request):
         supabase_uid = decoded['sub']
         email = decoded.get('email', '')
         f_name, l_name = _extract_name(decoded)
-        
+
         user, created = User.objects.get_or_create(
             username=supabase_uid,
             defaults={'email': email, 'first_name': f_name, 'last_name': l_name},
@@ -589,6 +653,7 @@ def login_view(request):
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def other_user_profile(request, user_id):
@@ -596,20 +661,20 @@ def other_user_profile(request, user_id):
         target_user = User.objects.select_related('details').get(id=user_id)
         serializer = OtherUserProfileSerializer(target_user)
         response_data = dict(serializer.data)
-        
+
         posts = Post.objects.filter(user=target_user).select_related('trip').order_by('-created_at')
         response_data['posts'] = [{
             'id': p.id, 'image_url': p.image_url, 'caption': p.caption, 'created_at': p.created_at,
             'trip': {'id': p.trip.id, 'destination': p.trip.destination} if p.trip else None
         } for p in posts]
-        
+
         response_data['is_following'] = Follower.objects.filter(follower=request.user, following=target_user).exists()
         response_data['is_own_profile'] = (request.user.id == target_user.id)
-        
+
         return Response(response_data)
     except User.DoesNotExist:
         return Response({'error': 'User not found'}, status=404)
-    
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -619,26 +684,27 @@ def follow_user(request, user_id):
         target_user = User.objects.get(id=user_id)
         if target_user == request.user:
             return Response({'error': 'Cannot follow yourself'}, status=status.HTTP_400_BAD_REQUEST)
-            
+
         follow, created = Follower.objects.get_or_create(follower=request.user, following=target_user)
-        
+
         if not created:
             follow.delete()
             return Response({'following': False, 'message': 'Unfollowed'}, status=status.HTTP_200_OK)
-        
-        # Create notification for follow
+
         Notification.objects.create(
             recipient=target_user,
             actor=request.user,
             verb='started following you'
         )
-        
+        print(f"✅ Follow notification created: {request.user} followed {target_user}")
+
         return Response({'following': True, 'message': 'Followed'}, status=status.HTTP_200_OK)
-        
+
     except User.DoesNotExist:
         return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 # ── TRIP FLOW ─────────────────────────────────────────────────────────────────
 
@@ -649,16 +715,17 @@ def save_trip(request):
     if serializer.is_valid():
         trip = serializer.save(user=request.user)
         SeatAvailability.objects.create(trip=trip, total_seats=trip.passengers, available_seats=trip.passengers)
-        
+
         details, _ = UserDetails.objects.get_or_create(user=request.user)
         registered = list(details.trips_registered or [])
         if trip.id not in registered:
             registered.append(trip.id)
             details.trips_registered = registered
             details.save()
-            
+
         return Response({'message': 'Trip saved', 'trip_id': trip.id}, status=201)
     return Response(serializer.errors, status=400)
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -667,61 +734,45 @@ def confirm_join(request):
     try:
         trip = Trip.objects.get(id=trip_id)
         group = GroupDetails.objects.get(trip=trip)
-        
+
         if request.user.id not in group.members_list:
             group.members_list.append(request.user.id)
             group.members_count += 1
             group.save()
 
-            # 🔔 NOTIFICATION LOGIC
+            # Register trip in user's trips_registered
+            details, _ = UserDetails.objects.get_or_create(user=request.user)
+            registered = list(details.trips_registered or [])
+            if trip.id not in registered:
+                registered.append(trip.id)
+                details.trips_registered = registered
+                details.save()
+
+            # 🔔 Create notification
             notif = Notification.objects.create(
                 recipient=group.admin,
                 actor=request.user,
                 verb='joined your trip',
                 target=trip,
             )
-            
-            # Real-time update via WebSockets
-            channel_layer = get_channel_layer()
-            async_to_sync(channel_layer.group_send)(
-                f'user_{group.admin.id}',
-                {
-                    'type': 'notification_message',
-                    'data': NotificationSerializer(notif).data
-                }
-            )
+            print(f"✅ Join notification created: {request.user} joined trip {trip.id}, notified admin {group.admin.id}")
+
+            # Real-time WebSocket update — wrapped so it never breaks the response
+            try:
+                channel_layer = get_channel_layer()
+                if channel_layer:
+                    async_to_sync(channel_layer.group_send)(
+                        f'user_{group.admin.id}',
+                        {
+                            'type': 'notification_message',
+                            'data': NotificationSerializer(notif).data
+                        }
+                    )
+            except Exception as ws_error:
+                print(f"⚠️ WebSocket notification failed (non-critical): {ws_error}")
+
             return Response({'message': 'Joined successfully'})
         return Response({'message': 'Already a member'})
     except Exception as e:
+        print(f"❌ confirm_join error: {e}")
         return Response({'error': str(e)}, status=400)
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def create_post(request):
-    trip_id = request.data.get("trip_id")
-    images = request.data.get("images", [])
-    
-    try:
-        trip = Trip.objects.get(id=trip_id)
-        group = GroupDetails.objects.get(trip=trip)
-    except (Trip.DoesNotExist, GroupDetails.DoesNotExist):
-        return Response({"error": "Trip or Group not found"}, status=404)
-
-    created_posts = []
-    for img in images:
-        post = Post.objects.create(user=request.user, trip=trip, image_url=img)
-        created_posts.append({"id": post.id, "image_url": post.image_url})
-
-    # Notify members (Bulk notification is better, but this follows your pattern)
-    member_ids = [m for m in group.members_list if m != request.user.id]
-    members = User.objects.filter(id__in=member_ids)
-    
-    notifications = [
-        Notification(recipient=m, actor=request.user, verb='posted in your trip', target=trip)
-        for m in members
-    ]
-    Notification.objects.bulk_create(notifications)
-
-    return Response({"message": "Posts created", "posts": created_posts})
-
-
